@@ -1,0 +1,91 @@
+pipeline {
+    agent any
+    environment {
+        SCANNER_HOME= tool 'sonar-scaner'
+        
+    }
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+    
+
+    stages {
+        stage('clean workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+        stage('check out from SCM') {
+            steps {
+                git branch: 'code', url: 'https://github.com/Muralidhar-br/cicd.git'
+                
+            }
+        }
+        stage('compile application') {
+            steps {
+                sh 'mvn compile'
+                
+            }
+        }
+        stage('test application') {
+            steps {
+                sh 'mvn test'
+                
+            }
+        }
+        stage('file system scan') {
+            steps {
+                sh "trivy fs -f table -o fs.html ."
+                
+            }
+        }
+        stage('sonarqube analysis') {
+            steps {
+                withSonarQubeEnv('sonarserver') {
+                    sh ''' ${SCANNER_HOME}/bin/sonar-scanner -Dsonar.projectName=first -Dsonar.projectKey=first \
+                -Dsonar.java.binaries=. '''
+}
+            }
+        }
+          stage("Quality Gate"){
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonartoken'
+                }
+            }
+        }
+         stage("build application"){
+            steps {
+                sh 'mvn package'
+            }
+        }
+        stage("build and tag docker image"){
+            steps {
+                script{
+                    withDockerRegistry(credentialsId: 'dockertoken', toolName: 'docker') {
+                        sh 'docker build -t mu221/first:latest .'
+                    }
+                }
+                
+            }
+        }
+        stage('docker image scan') {
+            steps {
+                sh "trivy image -f table -o image.html mu221/first:latest"
+                
+            }
+        }
+        stage('push docker image') {
+            steps {
+                script{
+                    withDockerRegistry(credentialsId: 'dockertoken', toolName: 'docker') {
+                        sh 'docker push mu221/first:latest'
+                    }
+                
+                }
+            }
+        }
+        
+    }
+}
