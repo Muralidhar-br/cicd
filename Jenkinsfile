@@ -1,115 +1,114 @@
 pipeline {
-    agent { label 'Jenkins-Agent' }
-    tools {
-        jdk 'Java17'
-        maven 'Maven3'
-    }
+    agent any
     environment {
-	    APP_NAME = "register-app-pipeline"
-            RELEASE = "1.0.0"
-            DOCKER_USER = "ashfaque9x"
-            DOCKER_PASS = 'dockerhub'
-            IMAGE_NAME = "${DOCKER_USER}" + "/" + "${APP_NAME}"
-            IMAGE_TAG = "${RELEASE}-${BUILD_NUMBER}"
-	    JENKINS_API_TOKEN = credentials("JENKINS_API_TOKEN")
+        SCANNER_HOME= tool 'sonar-scaner'
+        DOCKER_IMAGE = "mu221/first-cicd:${BUILD_NUMBER}"
+        
+        
     }
-    stages{
-        stage("Cleanup Workspace"){
-                steps {
+    tools {
+        jdk 'jdk17'
+        maven 'maven3'
+    }
+    
+
+    stages {
+        stage('clean workspace') {
+            steps {
                 cleanWs()
-                }
+            }
         }
-
-        stage("Checkout from SCM"){
-                steps {
-                    git branch: 'main', credentialsId: 'github', url: 'https://github.com/Ashfaque-9x/register-app'
-                }
+        stage('check out from SCM') {
+            steps {
+                git branch: 'code', url: 'https://github.com/Muralidhar-br/cicd.git'
+                
+            }
         }
-
-        stage("Build Application"){
+        stage('compile application') {
             steps {
-                sh "mvn clean package"
+                sh 'mvn compile'
+                
             }
-
-       }
-
-       stage("Test Application"){
-           steps {
-                 sh "mvn test"
-           }
-       }
-
-       stage("SonarQube Analysis"){
-           steps {
-	           script {
-		        withSonarQubeEnv(credentialsId: 'jenkins-sonarqube-token') { 
-                        sh "mvn sonar:sonar"
-		        }
-	           }	
-           }
-       }
-
-       stage("Quality Gate"){
-           steps {
-               script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'jenkins-sonarqube-token'
-                }	
-            }
-
         }
-
-        stage("Build & Push Docker Image") {
+        stage('test application') {
             steps {
-                script {
-                    docker.withRegistry('',DOCKER_PASS) {
-                        docker_image = docker.build "${IMAGE_NAME}"
-                    }
-
-                    docker.withRegistry('',DOCKER_PASS) {
-                        docker_image.push("${IMAGE_TAG}")
-                        docker_image.push('latest')
-                    }
-                }
+                sh 'mvn test'
+                
             }
-
-       }
-
-       stage("Trivy Scan") {
-           steps {
-               script {
-	            sh ('docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image ashfaque9x/register-app-pipeline:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format table')
-               }
-           }
-       }
-
-       stage ('Cleanup Artifacts') {
-           steps {
-               script {
-                    sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG}"
-                    sh "docker rmi ${IMAGE_NAME}:latest"
-               }
-          }
-       }
-
-       stage("Trigger CD Pipeline") {
+        }
+        stage('file system scan') {
             steps {
-                script {
-                    sh "curl -v -k --user clouduser:${JENKINS_API_TOKEN} -X POST -H 'cache-control: no-cache' -H 'content-type: application/x-www-form-urlencoded' --data 'IMAGE_TAG=${IMAGE_TAG}' 'ec2-13-232-128-192.ap-south-1.compute.amazonaws.com:8080/job/gitops-register-app-cd/buildWithParameters?token=gitops-token'"
-                }
+                sh "trivy fs -f table -o fs.html ."
+                
             }
-       }
-    }
-
-    post {
-       failure {
-             emailext body: '''${SCRIPT, template="groovy-html.template"}''', 
-                      subject: "${env.JOB_NAME} - Build # ${env.BUILD_NUMBER} - Failed", 
-                      mimeType: 'text/html',to: "ashfaque.s510@gmail.com"
-      }
-      success {
-            emailext body: '''${SCRIPT, template="groovy-html.template"}''', 
-                     subject: "${env.JOB_NAME} - Build # ${env.BUILD_NUMBER} - Successful", 
-                     mimeType: 'text/html',to: "ashfaque.s510@gmail.com"
-      }      
-   }
+        }
+        stage('sonarqube analysis') {
+            steps {
+                withSonarQubeEnv('sonarserver') {
+                    sh ''' ${SCANNER_HOME}/bin/sonar-scanner -Dsonar.projectName=first -Dsonar.projectKey=first \
+                -Dsonar.java.binaries=. '''
 }
+            }
+        }
+          stage("Quality Gate"){
+            steps {
+                script {
+                    waitForQualityGate abortPipeline: false, credentialsId: 'sonartoken'
+                }
+            }
+        }
+         stage("build application"){
+            steps {
+                sh 'mvn package'
+            }
+        }
+        stage("build and tag docker image"){
+            steps {
+                script{
+                    withDockerRegistry(credentialsId: 'dockertoken', toolName: 'docker') {
+                        sh 'docker build -t ${DOCKER_IMAGE} .'
+                    }
+                }
+                
+            }
+        }
+        stage('docker image scan') {
+            steps {
+                sh "trivy image -f table -o image.html ${DOCKER_IMAGE}"
+                
+            }
+        }
+        stage('push docker image') {
+            steps {
+                script{
+                    withDockerRegistry(credentialsId: 'dockertoken', toolName: 'docker') {
+                        sh 'docker push ${DOCKER_IMAGE}'
+                    }
+                
+                }
+            }
+        }
+        stage('Update Deployment File') {
+            environment {
+            GIT_REPO_NAME = "cicd"
+            GIT_USER_NAME = "Muralidhar-br"
+            APP_NAME = "first-cicd"
+            }
+            steps {
+                withCredentials([gitUsernamePassword(credentialsId: 'git-token', gitToolName: 'git')]) {
+                    sh '''
+                        git config user.email "mbr22297@gmail.com"
+                        git config user.name "muralidhar"
+                        BUILD_NUMBER=${BUILD_NUMBER}
+                        sed -i "s/${APP_NAME}:.*/${APP_NAME}:${BUILD_NUMBER}/g" dep/deployment.yaml
+                        git add dep/deployment.yaml
+                        git commit -m "Update deployment image to version ${BUILD_NUMBER}"
+                        git push https://${git-token}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME} HEAD:code
+                    '''
+                }
+            }
+        }
+        
+    }
+}
+
